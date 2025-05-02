@@ -309,28 +309,13 @@ class RLOOTrainer(Trainer):
         icount = 0
         for update in range(1, args.num_total_batches + 1):
             icount += 1
-            #if icount == 16:
+            #if icount == 5:
             #    pdb.set_trace()
 
             self.state.episode += 1 * args.batch_size
             data = next(iter_dataloader)
             #pdb.set_trace()
             with torch.no_grad():
-                '''
-                prompts = [x["prompt"] for x in data]
-
-                #copy code from trl/trainer/grpo_trainer.py
-                prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in data]
-                prompt_inputs = self.processing_class(
-                                text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
-                                ) 
-                prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-                '''
-
-                #prompts = data['prompt'] 
-                #queries = data['prompt_input_ids'].to(device)
-                #prompt_mask = data['prompt_attention_mask'] 
-
                 prompts = [x["prompt"] for x in data]
                 prompts = [x for i in range(args.rloo_k) for x in prompts]
 
@@ -410,9 +395,6 @@ class RLOOTrainer(Trainer):
 
                         # Repeat all input columns (but "prompt" and "completion") to match the number of generations
                         reward_func = reward_model
-                        #keys = [key for key in data[0] if key in ["solution"]]
-                        #keys = [key for key in data[0] if key not in ["prompt", "completion","input_ids", "prompt_input_ids", "prompt_attention_mask", "solution_ids"]]
-                        #reward_kwargs = {key: [example[key] for example in data] for key in keys}
                         reward_kwargs = {'solution': solutions}
 
                         #pdb.set_trace()
@@ -451,6 +433,7 @@ class RLOOTrainer(Trainer):
                 contain_eos_token = torch.any(postprocessed_responses == processing_class.eos_token_id, dim=-1)
                 if args.missing_eos_penalty is not None:
                     scores[~contain_eos_token] -= self.args.missing_eos_penalty
+
                 # accelerator.print(f"{scores=}, {(contain_eos_token.sum() / len(contain_eos_token))=}")
 
                 # be very careful with `padding_mask_p1`; see https://excalidraw.com/#json=LWnzG4w2k5DjF_EOL_xPt,e2w3a-hFJ_gX5vOfeyXGTw
@@ -628,23 +611,34 @@ class RLOOTrainer(Trainer):
 
     def generate_completions(self, sampling: bool = False):
         #if self.eval_dataloader:
-        return
         args = self.args
         processing_class = self.processing_class
+
         generation_config = GenerationConfig(
-            max_new_tokens=self.args.response_length,
-            temperature=(0.01 + 1e-7),
-            top_k=0.0,
-            top_p=1.0,
+            max_new_tokens=args.max_completion_length,
             do_sample=True,
+            pad_token_id=processing_class.pad_token_id,
+            bos_token_id=processing_class.bos_token_id,
+            eos_token_id=processing_class.eos_token_id,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            min_p=args.min_p,
+            repetition_penalty=args.repetition_penalty,
         )
 
         table = defaultdict(list)
+        device = self.accelerator.device
+
         with unwrap_model_for_generation(
             self.model, self.accelerator, gather_deepspeed3_params=self.args.ds3_gather_for_generation
         ) as unwrapped_model:
-            for batch in self.eval_dataloader:
-                query = batch["input_ids"]
+            for batch in self.dataloader:
+                #query = batch["input_ids"]
+                query = torch.tensor([x['prompt_input_ids'].tolist() for x in batch], dtype=torch.int32).to(device)
+                prompts = [x["prompt"] for x in batch]
+                solutions = [x['solution'] for x in batch]
+
                 with torch.no_grad():
                     context_length = query.shape[1]
                     query_response, _ = batch_generation(
@@ -677,12 +671,26 @@ class RLOOTrainer(Trainer):
                             context_length,
                         )
                     else:
-                        score = torch.tensor(
-                            self.reward_model(
-                                processing_class.batch_decode(postprocessed_query_response, skip_special_tokens=True)
-                            ),
-                            dtype=torch.float,
-                        ).to(postprocessed_query_response.device)
+
+                        completion_ids = postprocessed_response
+                        completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+
+                        if is_conversational(batch[0]):
+                            completions = []
+                            for prompt, completion in zip(prompts, completions_text):
+                                bootstrap = prompt.pop()["content"] if prompt[-1]["role"] == "assistant" else ""
+                                completions.append([{"role": "assistant", "content": bootstrap + completion}])
+                        else:
+                            completions = completions_text
+
+                        reward_func = self.reward_model
+                        reward_kwargs = {'solution': solutions}
+
+                        output_reward_func = reward_func[0](prompts=prompts, completions=completions, **reward_kwargs)
+                        # Convert None values to NaN
+                        output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
+                        score = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
+
                     table["score"].extend(self.accelerator.gather_for_metrics(score).float().cpu().numpy())
 
                 if sampling:

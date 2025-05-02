@@ -36,6 +36,7 @@ from transformers import (
 from transformers.data.data_collator import DataCollatorMixin
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 from torch.utils.data import DataLoader
+from math_verify import parse
 
 from src.open_r1.configs import GRPOScriptArguments
 from src.open_r1.rewards import get_reward_funcs
@@ -95,37 +96,6 @@ def pad(tensors: List[torch.Tensor], padding_value: int = 0, padding_side: str =
     return output
 
 #copy code from handbook run_dpo.py
-class RlooDataCollatorOld(DataCollatorMixin):
-    """
-    """
-    def __init__(
-        self,
-        pad_token_id: int=0,
-        return_tensors : str='pt', 
-        ):
-
-        self.pad_token_id = pad_token_id
-        self.return_tensors = return_tensors
-
-    def torch_call(self, examples: List[Union[List[int], Any, Dict[str, Any]]]) -> Dict[str, Any]:
-        # Convert to tensor
-        prompt_input_ids = [torch.tensor(example["prompt_input_ids"]) for example in examples]
-        prompt_attention_mask = [torch.ones_like(input_ids) for input_ids in prompt_input_ids]
-        
-        solution = [example["solution"] for example in examples]
-        prompt = [example["prompt"] for example in examples]
-
-        # Pad
-        output = {}
-        output["prompt_input_ids"] = pad(prompt_input_ids, padding_value=self.pad_token_id, padding_side="left")
-        output["prompt_attention_mask"] = pad(prompt_attention_mask, padding_value=0, padding_side="left")
-
-        output["solution_ids"] = solution
-        output["prompt"] = prompt
-
-        return output
-
-#copy code from handbook run_dpo.py
 class RlooDataCollator(DataCollatorMixin):
     """
     """
@@ -162,12 +132,25 @@ class RlooDataCollator(DataCollatorMixin):
             current_dict = {}
             current_dict["prompt_input_ids"] = prompt_input_ids
             current_dict["prompt_attention_mask"] = prompt_attention_mask
+
+            '''
+            #verify solution field
+            gold_parsed = parse(
+                solution,
+                extraction_mode="first_match",
+            )
+            if len(gold_parsed) == 0 :
+                print(f"verify failed, gold: {gold_parsed}")
+                continue
+            '''
             current_dict["solution"] = solution
+
             current_dict["prompt"] = prompt
             new_output.append(current_dict)
 
         return new_output
 
+'''
 def load_custom_data(script_args, training_args, model_args, tokenizer) :
 
     # Load the dataset
@@ -191,6 +174,7 @@ def load_custom_data(script_args, training_args, model_args, tokenizer) :
             output.append(current_dict)
 
         return output
+'''
 
 def load_custom_data(script_args, training_args, model_args, tokenizer) :
 
@@ -392,11 +376,6 @@ def main(script_args, training_args, model_args):
     ###############
     logger.info("*** Train ***")
     train_result = trainer.train()
-    metrics = train_result.metrics
-    metrics["train_samples"] = len(dataset[script_args.dataset_train_split])
-    trainer.log_metrics("train", metrics)
-    trainer.save_metrics("train", metrics)
-    trainer.save_state()
 
     ##################################
     # Save model and create model card
@@ -405,16 +384,7 @@ def main(script_args, training_args, model_args):
     trainer.save_model(training_args.output_dir)
     logger.info(f"Model saved to {training_args.output_dir}")
 
-    # Save everything else on main process
-    kwargs = {
-        "dataset_name": script_args.dataset_name,
-        "tags": ["open-r1"],
-    }
-    if trainer.accelerator.is_main_process:
-        trainer.create_model_card(**kwargs)
-        # Restore k,v cache for fast inference
-        trainer.model.config.use_cache = True
-        trainer.model.config.save_pretrained(training_args.output_dir)
+    trainer.generate_completions()
 
     ##########
     # Evaluate
