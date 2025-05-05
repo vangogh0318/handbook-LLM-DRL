@@ -54,6 +54,15 @@ class GRPOConfig(trl.GRPOConfig):
         default=None,
         metadata={"help": ("The group to store runs under.")},
     )
+    normalize_reward: bool = field(
+        default=False,
+        metadata={"help": "Whether to normalize rewards"},
+    )
+
+    normalize_advantage: bool = field(
+        default=False,
+        metadata={"help": "Whether to normalize advantages"},
+    )
 
 
 @dataclass

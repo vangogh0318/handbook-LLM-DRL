@@ -314,7 +314,7 @@ class RLOOTrainer(Trainer):
 
             self.state.episode += 1 * args.batch_size
             data = next(iter_dataloader)
-            #pdb.set_trace()
+            pdb.set_trace()
             with torch.no_grad():
                 prompts = [x["prompt"] for x in data]
                 prompts = [x for i in range(args.rloo_k) for x in prompts]
@@ -600,7 +600,8 @@ class RLOOTrainer(Trainer):
             torch.cuda.empty_cache()
             gc.collect()
 
-            if args.num_sample_generations > 0 and (update - 1) % self.sample_generations_freq == 0:
+            #if args.num_sample_generations > 0 and (update - 1) % self.sample_generations_freq == 0:
+            if args.num_sample_generations > 0 and (update - 1) % 50 == 0:
                 self.generate_completions(sampling=True)
 
         # HF trainer specifics
